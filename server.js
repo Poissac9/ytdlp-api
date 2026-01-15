@@ -47,7 +47,7 @@ app.get('/health', (req, res) => {
 app.get('/search', async (req, res) => {
     try {
         const query = req.query.q;
-        const limit = parseInt(req.query.limit) || 15;
+        const limit = parseInt(req.query.limit) || 20; // Get more to filter
 
         if (!query) {
             return res.status(400).json({ error: 'Query is required' });
@@ -68,6 +68,14 @@ app.get('/search', async (req, res) => {
             .map(line => {
                 try {
                     const data = JSON.parse(line);
+                    // Skip channels (IDs starting with UC) and playlists
+                    if (!data.id || data.id.startsWith('UC') || data.id.startsWith('PL')) {
+                        return null;
+                    }
+                    // Valid YouTube video IDs are 11 characters
+                    if (data.id.length !== 11) {
+                        return null;
+                    }
                     return {
                         id: data.id,
                         videoId: data.id,
@@ -81,7 +89,8 @@ app.get('/search', async (req, res) => {
                     return null;
                 }
             })
-            .filter(Boolean);
+            .filter(Boolean)
+            .slice(0, 15); // Limit to 15 results
 
         res.json({ results, source: 'yt-dlp' });
     } catch (error) {
