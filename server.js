@@ -133,6 +133,56 @@ app.get('/audio/:videoId', async (req, res) => {
     }
 });
 
+// Stream audio through proxy (bypasses CORS)
+app.get('/stream/:videoId', async (req, res) => {
+    try {
+        const { videoId } = req.params;
+
+        if (!videoId) {
+            return res.status(400).json({ error: 'Video ID is required' });
+        }
+
+        // Get the audio URL from yt-dlp
+        const args = [
+            `https://www.youtube.com/watch?v=${videoId}`,
+            '--dump-json',
+            '-f', 'bestaudio',
+            '--no-warnings',
+        ];
+
+        const output = await runYtdlp(args);
+        const data = JSON.parse(output);
+        const audioUrl = data.url;
+
+        if (!audioUrl) {
+            return res.status(500).json({ error: 'No audio URL found' });
+        }
+
+        // Fetch the audio and pipe it through
+        const https = require('https');
+        const http = require('http');
+        const protocol = audioUrl.startsWith('https') ? https : http;
+
+        protocol.get(audioUrl, (proxyRes) => {
+            // Forward headers
+            res.setHeader('Content-Type', proxyRes.headers['content-type'] || 'audio/webm');
+            if (proxyRes.headers['content-length']) {
+                res.setHeader('Content-Length', proxyRes.headers['content-length']);
+            }
+            res.setHeader('Accept-Ranges', 'bytes');
+
+            // Pipe the audio stream
+            proxyRes.pipe(res);
+        }).on('error', (err) => {
+            console.error('Stream proxy error:', err);
+            res.status(500).json({ error: 'Failed to stream audio' });
+        });
+    } catch (error) {
+        console.error('Stream error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Import playlist or video
 app.post('/import', async (req, res) => {
     try {
