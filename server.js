@@ -143,10 +143,11 @@ app.get('/stream/:videoId', async (req, res) => {
         }
 
         // Get the audio URL from yt-dlp
+        // Try m4a first for better compatibility, fallback to bestaudio
         const args = [
             `https://www.youtube.com/watch?v=${videoId}`,
             '--dump-json',
-            '-f', 'bestaudio',
+            '-f', 'bestaudio[ext=m4a]/bestaudio',
             '--no-warnings',
         ];
 
@@ -158,25 +159,73 @@ app.get('/stream/:videoId', async (req, res) => {
             return res.status(500).json({ error: 'No audio URL found' });
         }
 
-        // Fetch the audio and pipe it through
-        const https = require('https');
-        const http = require('http');
-        const protocol = audioUrl.startsWith('https') ? https : http;
-
-        protocol.get(audioUrl, (proxyRes) => {
-            // Forward headers
-            res.setHeader('Content-Type', proxyRes.headers['content-type'] || 'audio/webm');
-            if (proxyRes.headers['content-length']) {
-                res.setHeader('Content-Length', proxyRes.headers['content-length']);
+        const makeRequest = (url, attempt = 0) => {
+            if (attempt > 5) {
+                res.status(500).json({ error: 'Too many redirects' });
+                return;
             }
-            res.setHeader('Accept-Ranges', 'bytes');
 
-            // Pipe the audio stream
-            proxyRes.pipe(res);
-        }).on('error', (err) => {
-            console.error('Stream proxy error:', err);
-            res.status(500).json({ error: 'Failed to stream audio' });
-        });
+            const https = require('https');
+            const http = require('http');
+            const protocol = url.startsWith('https') ? https : http;
+
+            const options = {
+                headers: {}
+            };
+
+            // Forward Range header if present
+            if (req.headers.range) {
+                options.headers['Range'] = req.headers.range;
+            }
+
+            protocol.get(url, options, (proxyRes) => {
+                // Handle Redirects
+                if (proxyRes.statusCode >= 300 && proxyRes.statusCode < 400 && proxyRes.headers.location) {
+                    // Consume response to free memory
+                    proxyRes.resume();
+                    makeRequest(proxyRes.headers.location, attempt + 1);
+                    return;
+                }
+
+                // Handle Errors
+                if (proxyRes.statusCode >= 400) {
+                    console.error('Proxy received upstream error:', proxyRes.statusCode);
+                    // Consume response
+                    proxyRes.resume();
+                    res.status(proxyRes.statusCode).json({ error: `Upstream error ${proxyRes.statusCode}` });
+                    return;
+                }
+
+                // Forward status and headers
+                res.status(proxyRes.statusCode);
+
+                const forwardHeaders = [
+                    'content-type',
+                    'content-length',
+                    'accept-ranges',
+                    'content-range',
+                    'cache-control',
+                    'last-modified'
+                ];
+
+                forwardHeaders.forEach(h => {
+                    if (proxyRes.headers[h]) {
+                        res.setHeader(h, proxyRes.headers[h]);
+                    }
+                });
+
+                // Pipe data
+                proxyRes.pipe(res);
+            }).on('error', (err) => {
+                console.error('Stream proxy connection error:', err);
+                if (!res.headersSent) {
+                    res.status(500).json({ error: 'Stream connection failed' });
+                }
+            });
+        };
+
+        makeRequest(audioUrl);
+
     } catch (error) {
         console.error('Stream error:', error);
         res.status(500).json({ error: error.message });
